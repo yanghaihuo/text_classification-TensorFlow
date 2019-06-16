@@ -1,0 +1,214 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Apr  9 14:31:24 2019
+
+@author: tongqing
+"""
+
+import jieba
+import re
+from collections import Counter
+import  tensorflow as tf
+from sklearn.model_selection import ShuffleSplit
+import codecs
+import numpy as np
+from sklearn.preprocessing import OneHotEncoder
+class load_data(object):
+    def __init__(self,path=r"C:\Users\tongqing\Desktop\code\python\work\relationIndx\dictionary\train.txt"):
+        try:
+            text=codecs.open(path,'r',encoding='utf-8').read().splitlines()
+        except:
+            self.data=None
+            print("please input right path")
+        else:
+             train=[]
+             label=[]
+             for sentence in text:
+                 #以每句话进行输入
+                 temp=sentence.split("。")
+                 pattern = re.compile(r'\d+')   # 查找数字
+                 result1 = pattern.findall(temp[1])
+                 train.append(temp[0])
+                 label.append(int(result1[0]))
+             label=np.array(label).reshape(-1,1)
+             self.data={"data":train,"label":label}
+
+class process_data(object):
+    def __init__(self,freq_len=None,unk_count=None,train_data=None):
+        self.freq_len=freq_len
+        self.unk_count=unk_count
+        self.train_data=train_data
+    def jieba_cut(self):
+        train=self.train_data
+        result_list=[]
+        for sentence in train:
+            # re.findall('[\u4e00-\u9fa5]+')提取中文，放在一个列表中，需要用“ ”.join进行合并
+            sentence = "".join(re.findall('[\u4e00-\u9fa5]+', sentence))
+            result = " ".join(jieba.cut(sentence))
+            result_list.append(result)
+        return result_list
+    def voc_to_int_and_padding(self):
+        result_list=self.jieba_cut()
+        text=' '.join(result_list).split(" ")
+        count=Counter(text).most_common()
+        voc_to_int =dict()
+        for word, frq in count:
+            if frq > self.unk_count:
+                voc_to_int[word]=len(voc_to_int)+1
+            else:
+                voc_to_int['unk']=0
+        int_to_voc=dict(zip(voc_to_int.values(),voc_to_int.keys()))
+        result_list_data = []
+        for sentence in result_list:
+            temp = []
+            print(sentence)
+            for word in sentence.split(" "):
+                if word in voc_to_int.keys():
+                    temp.append(voc_to_int[word])
+                else:
+                    temp.append(voc_to_int['unk'])
+            result_list_data.append(temp)
+        new_data = []
+        for sen in result_list_data:
+            if (len(sen) <self.freq_len):
+                new_data.append(np.pad(sen, (0, self.freq_len - len(sen)), 'constant', constant_values=(0)))
+            else:
+                new_data.append(sen[:self.freq_len])
+        new_dt=np.array(new_data)
+        print(new_dt)
+        return voc_to_int,int_to_voc,new_dt,result_list_data
+
+class data_split(object):
+    def __init__(self,data_train,label):
+        self.data_train=data_train
+        self.label=label
+    def split(self):
+        ss=ShuffleSplit(n_splits=1,test_size=0.2,random_state=0)
+        for train_indx,text_indx in ss.split(self.data_train,self.label):
+            train_x=self.data_train[train_indx]
+            train_y=self.label[train_indx]
+            test_x=self.data_train[text_indx]
+            test_y=self.label[text_indx]
+        return train_x,train_y,test_x,test_y
+
+
+
+freq_len=20
+#将词频多少的纳入
+unk_count=5        
+ #导入数据   
+load_dt=load_data()
+train_data=load_dt.data['data']
+train_label=load_dt.data['label']
+enc=OneHotEncoder()
+train_label=enc.fit_transform(train_label).todense()
+temp=process_data(freq_len=freq_len,unk_count=unk_count,train_data=train_data)
+voc_to_int,_, new_data,_=temp.voc_to_int_and_padding()   
+split=data_split(data_train=new_data,label=train_label)
+
+
+
+
+
+
+train_x,train_y,test_x,test_y=split.split()
+
+def get_batches(x, y, batch_size=35): 
+    n_batches = len(x)//batch_size 
+    x, y = x[:n_batches*batch_size], y[:n_batches*batch_size] 
+    for ii in range(0, len(x), batch_size): 
+        yield x[ii:ii+batch_size], y[ii:ii+batch_size]
+
+####################lstm    
+lstm_size = 256
+lstm_layers = 1
+batch_size = 50
+learning_rate = 0.00001  
+n_words=len(voc_to_int)
+
+graph=tf.reset_default_graph()
+X = tf.placeholder(tf.int32,[None,20],name='inputs')
+#4代表label类别
+labels_ = tf.placeholder(tf.int32,[None,4],name='labels')
+keep_prob = tf.placeholder(tf.float32,name='keep_prob')
+
+embed_size =15
+embedding = tf.Variable(tf.random_uniform((n_words,embed_size),-1,1))
+embed = tf.nn.embedding_lookup(embedding,X)
+#创建基础的LSTM cell
+
+
+#######forword
+lstm_for = tf.contrib.rnn.BasicLSTMCell(lstm_size)
+drop_for = tf.contrib.rnn.DropoutWrapper(lstm_for,output_keep_prob=keep_prob)
+cell_for = tf.contrib.rnn.MultiRNNCell([drop_for]*lstm_layers)
+
+
+#######backrword
+lstm_back = tf.contrib.rnn.BasicLSTMCell(lstm_size)
+drop_back = tf.contrib.rnn.DropoutWrapper(lstm_back,output_keep_prob=keep_prob)
+cell_back = tf.contrib.rnn.MultiRNNCell([drop_back]*lstm_layers)
+
+
+outputs,final_state = tf.nn.bidirectional_dynamic_rnn(cell_fw=cell_for,
+        cell_bw=cell_back,
+        inputs=embed,
+        dtype=tf.float32)
+
+
+
+outputs_fw=outputs[0]
+outputs_bw = outputs[1]
+max_pool =outputs_fw[:,-1,:]+outputs_bw[:,-1,:] 
+#全连接层4代表label类别
+predictions = tf.contrib.layers.fully_connected(max_pool, 4, activation_fn=tf.sigmoid)
+labe_predict=tf.argmax(predictions, 1)
+label_real=tf.argmax(labels_, 1)
+mat=tf.confusion_matrix(labels=label_real,predictions=labe_predict)
+with tf.name_scope('cost'): 
+    cost = tf.losses.sigmoid_cross_entropy(multi_class_labels=labels_,logits=predictions)
+    tf.summary.scalar('cost',cost) 
+    optimizer = tf.train.AdamOptimizer(learning_rate).minimize(cost)
+
+with tf.name_scope('accuracy'): 
+    accuracy = tf.reduce_mean(tf.cast( tf.equal(tf.argmax(predictions, 1), tf.argmax(labels_, 1)), tf.float32)) 
+    tf.summary.scalar('accuracy',accuracy)
+
+merged = tf.summary.merge_all() 
+direc = r'C:\Users\tongqing\Desktop\code\python\work\relationIndx\Lstm\output' 
+train_writer = tf.summary.FileWriter(direc+'\\train',graph) 
+test_writer = tf.summary.FileWriter(direc+'\\test',graph)
+
+epochs = 100
+saver = tf.train.Saver()
+with tf.Session() as sess:
+    sess.run(tf.global_variables_initializer())
+    iteration = 1
+    for e in range(epochs):
+        for ii, (x, y) in enumerate(get_batches(train_x, train_y, batch_size), 25):
+            feed = {X: x,
+                    labels_: y,
+                    keep_prob:0.9}
+            loss, _, summary1 = sess.run([cost, optimizer, merged], feed_dict=feed)
+            eaa=sess.run(embed,feed_dict={X:x})
+            if iteration%5==0:
+#                tf.confusion_matrix()
+                train_writer.add_summary(summary1,iteration)
+                print("Epoch: {}/{}".format(e+1, epochs),
+                      "Iteration: {}".format(iteration),
+                      "Train loss: {:.3f}".format(loss))
+#                print(sess.run(confumax,feed_dict={X: x,labels_: y,keep_prob:0.6}))
+            if iteration%25==0:
+                val_acc = []
+                for x, y in get_batches(test_x, test_y, batch_size):
+                    feed = {X: x,
+                            labels_: y,
+                            keep_prob:1.0}
+                    batch_acc, summary2 = sess.run([accuracy, merged], feed_dict=feed)
+                    val_acc.append(batch_acc)
+#                print(sess.run(confumax,feed_dict={X: x,labels_: y,keep_prob:0.6}))
+                print(sess.run(mat,feed_dict=feed))
+                test_writer.add_summary(summary2,iteration)
+                print("Val acc: {:.3f}".format(np.mean(val_acc)))
+            iteration +=1
+                    
